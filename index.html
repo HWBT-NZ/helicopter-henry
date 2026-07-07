@@ -137,30 +137,41 @@ const vcanvas = document.createElement('canvas');          // virtual back-buffe
 const ctx = vcanvas.getContext('2d', { alpha:false });     // <- all game drawing uses this
 const fireBtn = document.getElementById('fireBtn');
 const IS_MOBILE = matchMedia('(pointer: coarse)').matches;
-let W=0,H=0,DPR=1,UI=1,VW=0,VH=0,S=1;
+// The SIM runs in a fixed WORLD_H-tall world (device-independent feel/difficulty). Each frame the
+// whole world renders under a WS = VH/WORLD_H transform into a low-res VW×VH virtual buffer, then
+// integer-scales (nearest-neighbor, S) onto the display for a crisp pixel-art look.
+const TARGET_VH = 224, WORLD_H = 720;
+let W=0,H=0,DPR=1,UI=1,VW=0,VH=0,S=1,WS=1;
+const VIEW = { x:0, y:0, scale:1 };   // client-CSS -> world mapping for pointer hit-testing
 function resize(){
   const vv = window.visualViewport;
   const cssW = Math.round(vv ? vv.width : window.innerWidth);
   const cssH = Math.round(vv ? vv.height : window.innerHeight);
   DPR = Math.min(window.devicePixelRatio||1, 2);
-  const devW = Math.floor(cssW*DPR), devH = Math.floor(cssH*DPR);
-  // P1: virtual buffer == device resolution, S=1 (identical output). P2 drops to low-res.
-  VW = devW; VH = devH; S = 1;
+  const devW = Math.round(cssW*DPR), devH = Math.round(cssH*DPR);
+  S  = Math.max(1, Math.floor(devH / TARGET_VH));   // integer display scale, in device px
+  VH = Math.ceil(devH / S);
+  VW = Math.round(U.clamp(Math.ceil(devW / S), 140, 640));
   vcanvas.width = VW; vcanvas.height = VH;
-  ctx.setTransform(DPR,0,0,DPR,0,0);          // draw code in CSS coords (removed in P2)
-  ctx.imageSmoothingEnabled = true;
-  W = cssW; H = cssH;
-  canvas.width = devW; canvas.height = devH;
-  canvas.style.width = cssW+'px'; canvas.style.height = cssH+'px';
-  dctx.imageSmoothingEnabled = true;
-  // global UI scale: shrinks HUD on small phones, stays ~1 on desktop
-  UI = U.clamp(Math.min(cssW,cssH)/560, 0.7, 1.15);
+  ctx.imageSmoothingEnabled = false;
+  WS = VH / WORLD_H;                 // world -> virtual scale
+  H = WORLD_H; W = VW / WS;          // sim space: H fixed, W follows the aspect ratio
+  canvas.width = VW*S; canvas.height = VH*S;   // display backing = exact integer multiple
+  const cw = VW*S/DPR, ch = VH*S/DPR;
+  canvas.style.width = cw+'px'; canvas.style.height = ch+'px';
+  canvas.style.marginLeft = Math.round((cssW-cw)/2)+'px';
+  canvas.style.marginTop  = Math.round((cssH-ch)/2)+'px';
+  dctx.imageSmoothingEnabled = false;
+  UI = U.clamp(Math.min(W,H)/560, 0.7, 1.15);
+  VIEW.x = (cssW-cw)/2; VIEW.y = (cssH-ch)/2; VIEW.scale = cw/W;
 }
 function blit(){
   dctx.setTransform(1,0,0,1,0,0);
-  dctx.imageSmoothingEnabled = (S===1);
+  dctx.imageSmoothingEnabled = false;
   dctx.drawImage(vcanvas, 0,0,VW,VH, 0,0, canvas.width, canvas.height);
 }
+const toWX = c => (c - VIEW.x)/VIEW.scale;   // client CSS px -> world x
+const toWY = c => (c - VIEW.y)/VIEW.scale;
 window.addEventListener('resize', resize);
 window.addEventListener('orientationchange', ()=>{ resize(); setTimeout(resize,200); });
 if(window.visualViewport) window.visualViewport.addEventListener('resize', resize);
@@ -801,9 +812,9 @@ window.addEventListener('keyup', e=>{
 });
 canvas.addEventListener('mousedown', e=>{ e.preventDefault();
   if(e.button===2){ if(mode===MODE.PLAYING) Input.fire=true; return; }
-  if(mode===MODE.GARAGE){ garageClick(e.clientX,e.clientY); return; }
+  if(mode===MODE.GARAGE){ garageClick(toWX(e.clientX),toWY(e.clientY)); return; }
   if(mode===MODE.TITLE){ // check garage button hotspot
-    if(titleGarageHot(e.clientX,e.clientY)){ mode=MODE.GARAGE; Audio.ensure(); Audio.SFX.blip(); return; } }
+    if(titleGarageHot(toWX(e.clientX),toWY(e.clientY))){ mode=MODE.GARAGE; Audio.ensure(); Audio.SFX.blip(); return; } }
   press(true);
 });
 window.addEventListener('mouseup', e=>{ if(e.button===2){ Input.fire=false; } else release(); });
@@ -813,8 +824,8 @@ let canvasTouches=0, lastTapT=0;
 canvas.addEventListener('touchstart', e=>{ e.preventDefault(); Audio.ensure();
   const t=e.changedTouches[0];
   canvasTouches += e.changedTouches.length;
-  if(mode===MODE.GARAGE){ garageClick(t.clientX,t.clientY); return; }
-  if(mode===MODE.TITLE){ if(titleGarageHot(t.clientX,t.clientY)){ mode=MODE.GARAGE; Audio.SFX.blip(); return; } press(true); return; }
+  if(mode===MODE.GARAGE){ garageClick(toWX(t.clientX),toWY(t.clientY)); return; }
+  if(mode===MODE.TITLE){ if(titleGarageHot(toWX(t.clientX),toWY(t.clientY))){ mode=MODE.GARAGE; Audio.SFX.blip(); return; } press(true); return; }
   if(mode===MODE.DEAD){ press(true); return; }
   if(mode==='paused'){ mode=MODE.PLAYING; return; }
   if(mode===MODE.PLAYING){
@@ -1177,7 +1188,7 @@ function loop(now){
   else Audio.stopTitle();
 
   // ---------- render ----------
-  ctx.setTransform(DPR,0,0,DPR,0,0);
+  ctx.setTransform(WS,0,0,WS,0,0);   // world -> virtual buffer
   ctx.clearRect(0,0,W,H);
   ctx.save(); ctx.translate(Cam.x,Cam.y);
   if(mode===MODE.PLAYING||mode==='paused'){ drawWorld(mode==='paused'?true:(game.iframe%2===0||true)); }
