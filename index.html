@@ -15,7 +15,8 @@
     touch-action: none; overscroll-behavior: none;
     -webkit-user-select: none; user-select: none;
     -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
-  canvas { display: block; position: fixed; inset: 0; touch-action: none; }
+  canvas { display: block; position: fixed; inset: 0; touch-action: none;
+    image-rendering: pixelated; image-rendering: crisp-edges; }
   #fireBtn { position: fixed; z-index: 20;
     right: calc(env(safe-area-inset-right, 0px) + 18px);
     bottom: calc(env(safe-area-inset-bottom, 0px) + 18px);
@@ -128,21 +129,37 @@ const Save = (() => {
 })();
 
 // ============================================================ CANVAS
-const canvas = document.getElementById('game');
-const ctx = canvas.getContext('2d', { alpha:false });
+// Display canvas (events + final blit target). All draw code renders to the VIRTUAL
+// back-buffer `ctx`/`vcanvas`; each frame we integer-scale it onto the display via blit().
+const canvas = document.getElementById('game');            // display element
+const dctx = canvas.getContext('2d', { alpha:false });     // display context (blit target)
+const vcanvas = document.createElement('canvas');          // virtual back-buffer
+const ctx = vcanvas.getContext('2d', { alpha:false });     // <- all game drawing uses this
 const fireBtn = document.getElementById('fireBtn');
 const IS_MOBILE = matchMedia('(pointer: coarse)').matches;
-let W=0,H=0,DPR=1,UI=1;
+let W=0,H=0,DPR=1,UI=1,VW=0,VH=0,S=1;
 function resize(){
   const vv = window.visualViewport;
-  W = Math.round(vv ? vv.width : window.innerWidth);
-  H = Math.round(vv ? vv.height : window.innerHeight);
+  const cssW = Math.round(vv ? vv.width : window.innerWidth);
+  const cssH = Math.round(vv ? vv.height : window.innerHeight);
   DPR = Math.min(window.devicePixelRatio||1, 2);
-  canvas.width = Math.floor(W*DPR); canvas.height = Math.floor(H*DPR);
-  canvas.style.width = W+'px'; canvas.style.height = H+'px';
-  ctx.setTransform(DPR,0,0,DPR,0,0);
+  const devW = Math.floor(cssW*DPR), devH = Math.floor(cssH*DPR);
+  // P1: virtual buffer == device resolution, S=1 (identical output). P2 drops to low-res.
+  VW = devW; VH = devH; S = 1;
+  vcanvas.width = VW; vcanvas.height = VH;
+  ctx.setTransform(DPR,0,0,DPR,0,0);          // draw code in CSS coords (removed in P2)
+  ctx.imageSmoothingEnabled = true;
+  W = cssW; H = cssH;
+  canvas.width = devW; canvas.height = devH;
+  canvas.style.width = cssW+'px'; canvas.style.height = cssH+'px';
+  dctx.imageSmoothingEnabled = true;
   // global UI scale: shrinks HUD on small phones, stays ~1 on desktop
-  UI = U.clamp(Math.min(W,H)/560, 0.7, 1.15);
+  UI = U.clamp(Math.min(cssW,cssH)/560, 0.7, 1.15);
+}
+function blit(){
+  dctx.setTransform(1,0,0,1,0,0);
+  dctx.imageSmoothingEnabled = (S===1);
+  dctx.drawImage(vcanvas, 0,0,VW,VH, 0,0, canvas.width, canvas.height);
 }
 window.addEventListener('resize', resize);
 window.addEventListener('orientationchange', ()=>{ resize(); setTimeout(resize,200); });
@@ -1181,6 +1198,9 @@ function loop(now){
 
   drawFlashVignette();
   if(Settings.showFps) drawFps();
+
+  // integer-scale the virtual back-buffer onto the display
+  blit();
 
   // touch FIRE button only appears while actually playing (avoids dead clutter on menus)
   if(IS_MOBILE) fireBtn.style.display = (mode===MODE.PLAYING || mode==='paused') ? 'flex' : 'none';
