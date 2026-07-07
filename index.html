@@ -193,13 +193,20 @@ function getPixels(text){
     if(img.data[(py*img.width+px)*4+3]>128) pts.push([px,py]);
   return pixCache[text]={pts,w:img.width,h:img.height};
 }
+// World-space API preserved (callers pass world coords), but glyph pixels are rendered as
+// integer-snapped rects in VIRTUAL space -> crisp pixel text at any scale.
 function pixText(text, cx, topY, maxW, color, shadow, maxCell, align){
   const {pts,w}=getPixels(text);
-  const cell = Math.max(2, Math.min(maxCell||8, Math.floor(maxW/w)));
-  let startX = align==='left'? cx : Math.round(cx-(w*cell)/2);
-  if(shadow){ ctx.fillStyle=shadow; for(const p of pts) ctx.fillRect(startX+p[0]*cell+cell, topY+p[1]*cell+cell, cell, cell); }
-  ctx.fillStyle=color; for(const p of pts) ctx.fillRect(startX+p[0]*cell, topY+p[1]*cell, cell, cell);
-  return { cell, w:w*cell, h:20*cell, x:startX };
+  const cell = Math.max(2, Math.min(maxCell||8, Math.floor(maxW/w)));   // world cell (return contract)
+  const cv = Math.max(1, Math.round(cell*WS));                          // integer virtual cell
+  const gwv = w*cv;
+  const sx = align==='left' ? Math.round(cx*WS) : Math.round(cx*WS - gwv/2);
+  const sy = Math.round(topY*WS);
+  ctx.save(); ctx.setTransform(1,0,0,1,0,0); ctx.imageSmoothingEnabled=false;
+  if(shadow){ ctx.fillStyle=shadow; for(const p of pts) ctx.fillRect(sx+p[0]*cv+cv, sy+p[1]*cv+cv, cv, cv); }
+  ctx.fillStyle=color; for(const p of pts) ctx.fillRect(sx+p[0]*cv, sy+p[1]*cv, cv, cv);
+  ctx.restore();
+  return { cell, w:w*cell, h:20*cell, x: align==='left'?cx:cx-(w*cell)/2 };
 }
 
 // ============================================================ GLOW SPRITE (prerendered, additive)
@@ -917,6 +924,7 @@ function buildSprites(){
   SPR.gem = mk(9,9,g=>{ g.fillStyle=COL.Cy; g.beginPath(); g.moveTo(4.5,0); g.lineTo(9,4.5); g.lineTo(4.5,9); g.lineTo(0,4.5); g.closePath(); g.fill();
     g.fillStyle=COL.cy; g.beginPath(); g.moveTo(4.5,0.5); g.lineTo(4.5,4.5); g.lineTo(1.5,4.5); g.closePath(); g.fill(); P(g,3,2,1,1,COL.w); });
   SPR.heart = bakeHeart(COL.hrt, COL.Hrt);
+  SPR.heartEmpty = bakeHeart('#2a2f3a', '#181c26');
   // --- power-ups (glow drawn separately) ---
   function capsule(icon){ return mk(13,13,g=>{ disc(g,6.5,6.5,6,COL.k); disc(g,6.5,6.5,5,'#12121f'); icon(g); }); }
   SPR.pu_shield = capsule(g=>{ g.strokeStyle=COL.cy; g.lineWidth=1.5; g.beginPath(); g.arc(6.5,6.5,4.5,0,7); g.stroke();
@@ -1050,15 +1058,15 @@ function drawWorld(showHeli){
 // ============================================================ DRAW: HUD
 function hudCell(base){ return Math.max(2, Math.round(base*UI)); }
 let heartsBottom=0;
-function drawHearts(){ const HC=hudCell(3); const s=Math.round(13*UI+2);
-  const m=Math.round(14*UI), y=14+20*HC+s+Math.round(8*UI), gap=Math.round(s*2.5);
-  for(let i=0;i<game.maxHp;i++){ const x=m+s+i*gap;
-    ctx.fillStyle='#2a060c'; drawHeart(x,y,s+3*UI);                        // dark outline
-    ctx.fillStyle = i<game.hp ? '#ff1f3d' : '#242833'; drawHeart(x,y,s);  // bright red / empty
-    if(i<game.hp){ ctx.fillStyle='rgba(255,255,255,0.55)';                // glossy shine
-      ctx.beginPath(); ctx.ellipse(x-s*0.32,y-s*0.32,s*0.22,s*0.16,-0.5,0,7); ctx.fill(); }
-  }
-  heartsBottom = y+s;
+function drawHearts(){
+  const sc=2, hw=SPR.heart.width*sc, hh=SPR.heart.height*sc;         // crisp integer-scaled hearts
+  const scoreH = Math.round((20*hudCell(3))*WS);                     // height of the score line (virtual)
+  const y = Math.round(14*WS) + scoreH + 3, x0 = 6, gap = hw+3;
+  ctx.save(); ctx.setTransform(1,0,0,1,0,0); ctx.imageSmoothingEnabled=false;
+  for(let i=0;i<game.maxHp;i++){ const img=i<game.hp?SPR.heart:SPR.heartEmpty;
+    ctx.drawImage(img, x0+i*gap, y, hw, hh); }
+  ctx.restore();
+  heartsBottom = (y+hh+2)/WS;                                        // world coords for power-up labels
 }
 function drawHUD(){
   const HC=hudCell(3), m=Math.round(14*UI), maxW=W*0.5;
