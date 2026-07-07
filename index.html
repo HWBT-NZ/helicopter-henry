@@ -107,7 +107,8 @@ const U = {
 const Save = (() => {
   const KEY = 'henry_save_v1';
   const DEFAULT = { coins:0, best:0, bestDist:0, runs:0, totalCoins:0,
-    upgrades:{}, trails:['neon'], trail:'neon', muted:false, reduceFx:false };
+    upgrades:{}, trails:['neon'], trail:'neon', muted:false, reduceFx:false,
+    scores:[{n:'HEN',s:2500},{n:'ACE',s:1800},{n:'PRO',s:1300},{n:'FLY',s:900},{n:'GG!',s:500}] };
   let data = load();
   function checksum(o){ let s=0,str=JSON.stringify(o.d); for(let i=0;i<str.length;i++) s=(s*31+str.charCodeAt(i))>>>0; return s; }
   function load(){
@@ -471,8 +472,13 @@ const Settings = { muted:Save.get('muted'), reduceFx:Save.get('reduceFx'), showF
 
 // ============================================================ GAME STATE
 const MODE = { TITLE:'title', GARAGE:'garage', PLAYING:'playing', DEAD:'dead' };
-let mode = MODE.TITLE;
+let mode = 'boot';
 let insertT = 0, insertFrom = null;   // coin-insert transition
+let bootT = 0, idleT = 0;             // boot sequence / title idle-to-attract
+let fx = null;                        // screen transition overlay
+let entry = null;                     // hi-score initials entry state
+function startTransition(toMode, onMid){ if(fx) return;
+  fx = { t:0, dur:26, half:false, onMid: onMid || (()=>{ mode=toMode; }) }; }
 let tick = 0;                          // sim ticks in a run
 let anim = 0;                          // global anim counter (always increments)
 
@@ -487,7 +493,7 @@ function resetRun(){
   game.spawnT = 90; game.badT=140; game.puT=600; game.laserT=900; game.blimpT=2600;
   game.fireCd = 0; game.fireBurst=0; game.shield=0; game.magnet=0; game.slowmoPU=0; game.launched=false;
   game.biome = 0; game.nextBiomeScore = Config.BIOME_LEN; game.milestone=0;
-  game.revives = 0; game.regenT = 0;
+  game.revives = 0; game.regenT = 0; game.wave = 1; game.demo = false; game.warnPending = false;
   game.tutorial = 220;   // grace ticks, no spawns
   Particles.clear();
   tick = 0;
@@ -555,12 +561,13 @@ function spawnLaser(){
 }
 function spawnBlimp(){
   game.blimp={ x:W+120, y:H*0.28, w:180, h:90, hp:14, maxhp:14, dropT:40, hitFlash:0, leaving:false };
-  pushBanner('!! MINI-BOSS !!', '#ff4d4d');
   Audio.SFX.milestoneBanner();
 }
 
 // ============================================================ BANNERS
-function pushBanner(text, col){ game.banners.push({text, col:col||'#ffe14d', life:150, max:150}); }
+function pushBanner(text, o){ if(typeof o==='string') o={col:o}; o=o||{};
+  game.banners.push({ text, sub:o.sub||'', col:o.col||'#ffe14d', flash:!!o.flash,
+    onEnd:o.onEnd||null, life:o.dur||140, max:o.dur||140 }); }
 
 // ============================================================ STEP (one fixed sim tick)
 function step(){
@@ -651,7 +658,10 @@ function step(){
     game.puT--; if(game.puT<=0){ spawnPickup(); game.puT=U.rand(260,460); }
     if(d>0.6 && U.chance(0.004)) spawnPowerup();
     game.laserT--; if(game.laserT<=0 && d>1.8){ spawnLaser(); game.laserT=U.rand(700,1200); }
-    game.blimpT--; if(game.blimpT<=0 && !game.blimp && d>2.2){ spawnBlimp(); game.blimpT=3200; }
+    game.blimpT--; if(game.blimpT<=0 && !game.blimp && !game.warnPending && d>2.2){
+      game.warnPending=true; game.blimpT=3200;
+      pushBanner('WARNING!!', {sub:'INCOMING BOSS', flash:true, dur:96, onEnd:()=>{ game.warnPending=false; if(mode===MODE.PLAYING||mode==='attract') spawnBlimp(); }});
+      Audio.SFX.hit(); }
   }
 
   // ---------- collisions: bullets ----------
@@ -763,16 +773,18 @@ function damage(sourceX){
 function die(){
   mode=MODE.DEAD;
   const fs=Math.floor(game.score);
-  if(fs>Save.get('best')) Save.set('best',fs);
-  if(Math.floor(game.dist)>Save.get('bestDist')) Save.set('bestDist',Math.floor(game.dist));
-  Save.set('runs', Save.get('runs')+1);
+  if(!game.demo){
+    if(fs>Save.get('best')) Save.set('best',fs);
+    if(Math.floor(game.dist)>Save.get('bestDist')) Save.set('bestDist',Math.floor(game.dist));
+    Save.set('runs', Save.get('runs')+1);
+  }
   burst(game.hx,game.hy,50,()=>U.pick(['#e52521','#ffe14d','#fff']),{smax:8,lmax:50,g:0.12});
   glowBurst(game.hx,game.hy,12,'#ff7a3c'); doHitstop(200); Cam.shake(1); doFlash('#fff',0.7);
   Audio.SFX.explode(); Audio.setIntensity(0); Audio.stopRotor();
 }
 function collectPickup(p){
-  if(p.kind==='coin'){ Save.addCoins(Config.COIN_VAL); game.score+=5; Audio.SFX.coin(); }
-  else if(p.kind==='gem'){ Save.addCoins(Config.GEM_VAL); game.score+=25; Audio.SFX.gem(); pushScorePop(p.x,p.y,'GEM'); }
+  if(p.kind==='coin'){ if(!game.demo) Save.addCoins(Config.COIN_VAL); game.score+=5; Audio.SFX.coin(); }
+  else if(p.kind==='gem'){ if(!game.demo) Save.addCoins(Config.GEM_VAL); game.score+=25; Audio.SFX.gem(); pushScorePop(p.x,p.y,'GEM'); }
   else if(p.kind==='heart'){ if(game.hp<game.maxHp) game.hp++; Audio.SFX.heart(); pushScorePop(p.x,p.y,'+HP'); doFlash('#7cf07c',0.2); }
   game.combo++; game.comboT=Config.COMBO_WINDOW;
   burst(p.x,p.y,6, p.kind==='gem'?'#7cf0ff':'#ffe14d', {smax:4,lmax:20});
@@ -785,10 +797,11 @@ function applyPowerup(kind){
   Audio.SFX.power(); glowBurst(game.hx,game.hy,8,'#b19cff'); doFlash('#b19cff',0.25);
 }
 function onMilestone(){ Audio.milestone(); Cam.shake(0.4); doFlash('#ffe14d',0.35);
-  Save.addCoins(Config.MILESTONE_COINS);
+  if(!game.demo) Save.addCoins(Config.MILESTONE_COINS);
   pushBanner(game.milestone*Config.MILESTONE_EVERY+' PTS!  +'+Config.MILESTONE_COINS, '#ffe14d');
   glowBurst(game.hx,game.hy,10,'#ffe14d'); }
-function onBiome(){ const b=BIOMES[game.biome]; pushBanner('ENTERING '+b.name, b.borderLite);
+function onBiome(){ const b=BIOMES[game.biome]; game.wave=(game.wave||1)+1;
+  pushBanner('WAVE '+game.wave, {sub:b.name, col:b.borderLite, dur:120});
   Audio.SFX.milestoneBanner(); Cam.shake(0.3); doFlash(b.borderLite,0.3);
   if(game.hp<game.maxHp){ game.hp++; } }
 
@@ -798,14 +811,24 @@ function pushScorePop(x,y,txt){ pops.push({x,y,txt,life:50,max:50}); }
 
 // ============================================================ INPUT
 const Input = { fly:false, fire:false };
-function press(fly){ Audio.ensure();
+function press(fly){ Audio.ensure(); idleT=0;
+  if(fx) return;
+  if(mode==='boot'){ startTransition(MODE.TITLE); return; }
+  if(mode==='attract'){ startTransition(MODE.TITLE); return; }
   if(mode===MODE.TITLE){ insertFrom='title'; insertT=0; mode='insert'; Audio.SFX.coinInsert(); return; }
-  if(mode===MODE.DEAD){ insertFrom='dead'; insertT=0; mode='insert'; Audio.SFX.coinInsert(); return; }
+  if(mode===MODE.DEAD){ const fs=Math.floor(game.score);
+    if(qualifies(fs)){ startEntry(fs); Audio.SFX.coinInsert(); }
+    else { insertFrom='dead'; insertT=0; mode='insert'; Audio.SFX.coinInsert(); } return; }
   if(mode===MODE.GARAGE){ return; }
   if(mode===MODE.PLAYING && fly) Input.fly=true;
 }
 function release(){ Input.fly=false; }
 window.addEventListener('keydown', e=>{
+  idleT=0;
+  if(mode==='entry'){ e.preventDefault();
+    if(e.key==='ArrowUp') entryInput('up'); else if(e.key==='ArrowDown') entryInput('down');
+    else if(e.key==='ArrowLeft') entryInput('left'); else if(e.key==='ArrowRight') entryInput('right');
+    else if(e.key==='Enter'||e.code==='Space') entryInput('ok'); return; }
   if(e.code==='Space'||e.key==='ArrowUp'){ e.preventDefault(); if(!e.repeat) press(true); else if(mode===MODE.PLAYING) Input.fly=true; }
   else if(e.key==='f'||e.key==='F'){ if(mode===MODE.PLAYING) Input.fire=true; }
   else if(e.key==='p'||e.key==='P'){ if(mode===MODE.PLAYING) mode='paused'; else if(mode==='paused') mode=MODE.PLAYING; }
@@ -828,9 +851,11 @@ window.addEventListener('mouseup', e=>{ if(e.button===2){ Input.fire=false; } el
 canvas.addEventListener('contextmenu', e=>e.preventDefault());
 // iPad / touch: hold to rise, release to fall, DOUBLE-TAP to shoot
 let canvasTouches=0, lastTapT=0;
-canvas.addEventListener('touchstart', e=>{ e.preventDefault(); Audio.ensure();
+canvas.addEventListener('touchstart', e=>{ e.preventDefault(); Audio.ensure(); idleT=0;
   const t=e.changedTouches[0];
   canvasTouches += e.changedTouches.length;
+  if(mode==='entry'){ entryTouch(toWX(t.clientX),toWY(t.clientY)); return; }
+  if(mode==='boot'||mode==='attract'){ startTransition(MODE.TITLE); return; }
   if(mode===MODE.GARAGE){ garageClick(toWX(t.clientX),toWY(t.clientY)); return; }
   if(mode===MODE.TITLE){ if(titleGarageHot(toWX(t.clientX),toWY(t.clientY))){ mode=MODE.GARAGE; Audio.SFX.blip(); return; } press(true); return; }
   if(mode===MODE.DEAD){ press(true); return; }
@@ -1095,9 +1120,18 @@ function drawHUD(){
   drawPops();
   if(Settings.muted && !IS_MOBILE) pixText('MUTED (M)', Math.round(14*UI), H-26, 140, '#f88','#000',hudCell(2),'left');
 }
-function drawBanners(){ let y=H*0.2;
-  for(const bn of game.banners){ const t=bn.life/bn.max; ctx.globalAlpha=Math.min(1,t*2);
-    pixText(bn.text, W/2, y, W*0.7, bn.col, '#000', 6); ctx.globalAlpha=1; y+=50; bn.life--; }
+function drawBanners(){
+  let i=0;
+  for(const bn of game.banners){ const t=bn.life/bn.max;
+    const cy=H*0.24 + i*H*0.13;
+    let col=bn.col; if(bn.flash) col=(Math.floor(anim/4)%2)?'#ffe14d':'#ff2b2b';
+    ctx.globalAlpha=Math.min(1, Math.min(t*3, 1)*Math.min((bn.max-bn.life)/6+0.2,1));
+    const r=pixText(bn.text, W/2, cy, W*0.82, col, '#000', 7);
+    if(bn.sub) pixText(bn.sub, W/2, cy+r.h*0.8, W*0.6, '#fff', '#000', 4);
+    ctx.globalAlpha=1; bn.life--;
+    if(bn.life<=0 && bn.onEnd){ const cb=bn.onEnd; bn.onEnd=null; cb(); }
+    i++;
+  }
   game.banners=game.banners.filter(b=>b.life>0);
 }
 function drawPops(){ for(const p of pops){ const t=p.life/p.max; ctx.globalAlpha=t; p.y-=0.6;
@@ -1205,6 +1239,64 @@ function drawGameOver(inserting){
   if(!inserting && Math.floor(anim/18)%2===0) pixText(IS_MOBILE?'TAP TO CONTINUE':'SPACE/CLICK = CONTINUE', W/2, H*0.86, W*0.66, '#fff', '#1a3a8f', 4);
 }
 
+// ============================================================ META: boot / transitions / hi-scores / attract
+function drawBoot(){ ctx.save(); ctx.setTransform(1,0,0,1,0,0); P(ctx,0,0,VW,VH,'#0a0a12'); ctx.restore();
+  const on=bootT>28;
+  pixText('HELICOPTER', W/2, H*0.34, W*0.66, on?'#ffe14d':'#5a4a10', '#b71c07', 6);
+  pixText('HENRY', W/2, H*0.50, W*0.36, on?'#ffe14d':'#5a4a10', '#b71c07', 6);
+  if(bootT>52) pixText('HWBT-NZ', W/2, H*0.72, W*0.28, '#5c94fc', '#000', 3);
+  ctx.save(); ctx.setTransform(1,0,0,1,0,0); ctx.globalAlpha=0.12; ctx.fillStyle='#fff';
+  ctx.fillRect(0,(bootT*5)%(VH+10),VW,2); ctx.globalAlpha=1; ctx.restore(); }
+function drawFX(){ if(!fx) return; const p=fx.t/fx.dur, a=p<0.5?p*2:(1-p)*2;
+  ctx.save(); ctx.setTransform(1,0,0,1,0,0); ctx.globalAlpha=a; P(ctx,0,0,VW,VH,'#000'); ctx.globalAlpha=1; ctx.restore();
+  if(!fx.half && p>=0.5){ fx.half=true; fx.onMid(); }
+  fx.t++; if(fx.t>fx.dur) fx=null; }
+
+function drawScores(topY, n){ const l=Save.get('scores')||[];
+  pixText('HI-SCORES', W/2, topY, W*0.5, '#ffe14d', '#b71c07', 4);
+  let y=topY+70; for(let i=0;i<Math.min(n,l.length);i++){ const s=l[i];
+    const row=(i+1)+'  '+s.n+'  '+String(s.s);
+    pixText(row, W/2, y, W*0.55, i===0?'#fff':'#9fd0ff', '#000', 3); y+=70; } }
+
+function qualifies(fs){ const l=Save.get('scores')||[]; return fs>0 && (l.length<10 || fs>l[l.length-1].s); }
+const CHARS='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.!-';
+function startEntry(fs){ entry={i:[7,4,13], col:0, score:fs}; mode='entry'; }   // default "HEN"
+function entryInput(a){ if(!entry) return;
+  if(a==='up') entry.i[entry.col]=(entry.i[entry.col]+1)%CHARS.length;
+  else if(a==='down') entry.i[entry.col]=(entry.i[entry.col]+CHARS.length-1)%CHARS.length;
+  else if(a==='left') entry.col=(entry.col+2)%3;
+  else if(a==='right') entry.col=(entry.col+1)%3;
+  else if(a==='ok'){ if(entry.col<2) entry.col++; else commitScore(); }
+  Audio.ensure(); Audio.SFX.blip(); }
+function commitScore(){ const name=entry.i.map(k=>CHARS[k]).join('');
+  const l=Save.get('scores')||[]; l.push({n:name, s:entry.score}); l.sort((a,b)=>b.s-a.s); if(l.length>10) l.length=10;
+  Save.set('scores', l); entry=null; Audio.SFX.power(); startTransition(MODE.TITLE); }
+function entryTouch(wx,wy){ if(!entry) return; const cw=W*0.13;
+  for(let c=0;c<3;c++){ const x=W/2+(c-1)*cw; if(Math.abs(wx-x)<cw*0.5 && wy>H*0.34 && wy<H*0.62){ entry.col=c; entryInput(wy<H*0.48?'up':'down'); return; } }
+  if(wy>H*0.72) entryInput('ok'); }
+function drawEntry(){ if(!entry) return; ctx.fillStyle='rgba(0,8,40,0.72)'; ctx.fillRect(0,0,W,H);
+  pixText('NEW HIGH SCORE!', W/2, H*0.1, W*0.82, '#ffe14d', '#b71c07', 6);
+  pixText('SCORE '+entry.score, W/2, H*0.24, W*0.4, '#fff', '#1a3a8f', 4);
+  const cw=W*0.13;
+  for(let c=0;c<3;c++){ const x=W/2+(c-1)*cw, ch=CHARS[entry.i[c]], sel=c===entry.col;
+    if(sel){ pixText('^', x, H*0.34, cw*0.5, '#ffe14d','#000',4); pixText('.', x, H*0.6, cw*0.5, '#ffe14d','#000',4); }
+    pixText(ch, x, H*0.4, cw*0.72, sel?'#ffe14d':'#fff', '#000', 8); }
+  pixText(IS_MOBILE?'TAP UP/DOWN THEN OK':'ARROWS  +  ENTER', W/2, H*0.68, W*0.7, '#9fd0ff','#000',3);
+  if(IS_MOBILE) pixText('[ OK ]', W/2, H*0.78, W*0.3, '#7cf07c','#000',4); }
+
+function autopilot(){
+  let nx=1e9; for(const o of game.obstacles){ if(o.kind==='pipe' && o.x>game.hx-10 && o.x<nx) nx=o.x; }
+  let target=H/2;
+  if(nx<1e9){ let topEnd=Config.BORDER, botStart=H-Config.BORDER;
+    for(const o of game.obstacles){ if(o.kind==='pipe' && Math.abs(o.x-nx)<60){ if(o.fromTop) topEnd=Math.max(topEnd,o.drawY+o.h); else botStart=Math.min(botStart,o.drawY); } }
+    target=(topEnd+botStart)/2; }
+  for(const o of game.obstacles){ if(o.kind==='saw' && o.x>game.hx && o.x<game.hx+W*0.22 && Math.abs(o.drawY-game.hy)<80) target+=(game.hy<o.drawY?-1:1)*90; }
+  target=U.clamp(target, Config.BORDER+40, H-Config.BORDER-40);
+  const fly=game.hy>target+6;
+  let fire=false; for(const e of game.baddies){ if(e.hp>0 && e.x>game.hx && e.x<game.hx+W*0.6 && Math.abs(e.y-game.hy)<52){ fire=true; break; } }
+  return {fly,fire}; }
+function startAttract(){ resetRun(); game.demo=true; game.launched=true; mode='attract'; acc=0; last=performance.now(); idleT=0; }
+
 // ============================================================ OVERLAY FX
 function drawFlashVignette(){
   if(flash>0.01){ ctx.fillStyle=flashCol; ctx.globalAlpha=flash*0.5; ctx.fillRect(0,0,W,H); ctx.globalAlpha=1; }
@@ -1235,37 +1327,49 @@ function loop(now){
   Cam.update(real);
 
   // sim
-  if(mode===MODE.PLAYING){
+  if(mode===MODE.PLAYING || mode==='attract'){
+    if(mode==='attract'){ const ap=autopilot(); Input.fly=ap.fly; Input.fire=ap.fire; }
     acc += real*timeScale;
     let steps=0;
-    while(acc>=Config.DT && steps<6){ step(); acc-=Config.DT; steps++; if(mode!==MODE.PLAYING) break; }
+    while(acc>=Config.DT && steps<6){ step(); acc-=Config.DT; steps++; if(mode!==MODE.PLAYING && mode!=='attract') break; }
     Particles.update(); driftClouds();
     Audio.rotor(game.vy, Input.fly);
   } else if(mode==='insert'){
     driftClouds(); Particles.update();
     insertT++; if(insertT>=34){ startPlay(); }
+  } else if(mode==='boot'){
+    driftClouds(); bootT++; if(bootT>96 && !fx) startTransition(MODE.TITLE);
   } else {
-    driftClouds(); if(mode===MODE.DEAD||mode==='paused') Particles.update();
+    driftClouds(); if(mode===MODE.DEAD||mode==='paused'||mode==='entry') Particles.update();
   }
+  // demo (attract) death -> fade back to title
+  if(mode===MODE.DEAD && game.demo){ Input.fly=false; Input.fire=false; if(!fx) startTransition(MODE.TITLE); }
+  // title idle -> attract demo
+  if(mode===MODE.TITLE){ idleT++; if(idleT>540 && !fx) startAttract(); }
 
   // title music on menu screens (starts once audio is unlocked)
-  if(mode===MODE.TITLE || mode===MODE.GARAGE || (mode==='insert'&&insertFrom==='title')) Audio.playTitle();
+  if(mode===MODE.TITLE || mode===MODE.GARAGE || mode==='attract' || mode==='entry' || (mode==='insert'&&insertFrom==='title')) Audio.playTitle();
   else Audio.stopTitle();
 
   // ---------- render ----------
   ctx.setTransform(WS,0,0,WS,0,0);   // world -> virtual buffer
   ctx.clearRect(0,0,W,H);
   ctx.save(); ctx.translate(Cam.x,Cam.y);
-  if(mode===MODE.PLAYING||mode==='paused'){ drawWorld(mode==='paused'?true:(game.iframe%2===0||true)); }
-  else if(mode===MODE.DEAD){ drawWorld(false); }
+  if(mode===MODE.PLAYING||mode==='paused'||mode==='attract'){ drawWorld(true); }
+  else if(mode===MODE.DEAD||mode==='entry'){ drawWorld(false); }
   else if(mode===MODE.TITLE){ drawTitle(); }
   else if(mode===MODE.GARAGE){ /* drawn below without shake */ }
   else if(mode==='insert'){ if(insertFrom==='title') drawTitle(); else drawWorld(false); }
   ctx.restore();
 
   // HUD / overlays (no shake)
-  if(mode===MODE.PLAYING||mode==='paused'){ drawHUD(); if(mode==='paused'){ ctx.fillStyle='#0008'; ctx.fillRect(0,0,W,H); pixText('PAUSED', W/2, H/2-40, W*0.4, '#fff','#000',7); pixText('P = RESUME', W/2, H/2+40, W*0.3, '#fff','#000',3); } }
+  if(mode===MODE.PLAYING||mode==='paused'||mode==='attract'){ drawHUD();
+    if(mode==='paused'){ ctx.fillStyle='#0008'; ctx.fillRect(0,0,W,H); pixText('PAUSED', W/2, H/2-40, W*0.4, '#fff','#000',7); pixText('P = RESUME', W/2, H/2+40, W*0.3, '#fff','#000',3); }
+    if(mode==='attract'){ pixText('DEMO', W/2, H*0.08, W*0.2, '#fff','#000',4);
+      if(Math.floor(anim/16)%2===0) pixText(IS_MOBILE?'TAP TO PLAY':'INSERT COIN  -  PRESS SPACE', W/2, H*0.9, W*0.7, '#ffe14d','#b71c07',4); } }
   else if(mode===MODE.DEAD){ drawGameOver(false); }
+  else if(mode==='entry'){ drawEntry(); }
+  else if(mode==='boot'){ drawBoot(); }
   else if(mode===MODE.GARAGE){ drawGarage(); }
   else if(mode==='insert'){ const slotY=insertFrom==='title'?H*0.60:H*0.64;
     if(insertFrom==='dead') drawGameOver(true); else { /* title slot already drawn */ drawCoinSlot(W/2,slotY,true); }
@@ -1273,6 +1377,7 @@ function loop(now){
     if(insertT<26) drawCoin(W/2,cy,12); }
 
   drawFlashVignette();
+  drawFX();
   if(Settings.showFps) drawFps();
 
   // integer-scale the virtual back-buffer onto the display
@@ -1291,7 +1396,7 @@ function startPlay(){ resetRun(); mode=MODE.PLAYING; Input.fly=false; acc=0; las
 buildSprites();
 seedClouds();
 resetRun();
-mode=MODE.TITLE;
+mode='boot';                 // boot sting -> fade -> title
 requestAnimationFrame(loop);
 
 })();
