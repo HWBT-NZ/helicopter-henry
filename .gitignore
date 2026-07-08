@@ -1,3 +1,5 @@
 .DS_Store
 node_modules/
 *.b64.txt
+.wrangler/
+.dev.vars

@@ -1,0 +1,13 @@
+name = "helicopter-henry"
+compatibility_date = "2024-11-01"
+pages_build_output_dir = "."
+
+# Global leaderboard store. Create it once, then paste the id it prints here:
+#   npx wrangler d1 create helicopter-henry-scores
+#   npx wrangler d1 execute helicopter-henry-scores --remote --file=./schema.sql
+# The same binding name (DB) must also be added under
+# Pages project -> Settings -> Functions -> D1 database bindings.
+[[d1_databases]]
+binding = "DB"
+database_name = "helicopter-henry-scores"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"

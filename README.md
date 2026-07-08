@@ -41,8 +41,34 @@ No build step, no dependencies, no internet needed. **Just open `index.html` in 
   clears the lane and grants invulnerability so you never flip straight back into a pipe.
 - Starts easy and ramps up with distance. Coins persist in `localStorage`; buy upgrades in the Garage.
 
+## Leaderboard
+
+There's a global high-score board (press **`L`** / the **SCORES** button on the title, or
+beat a high score to be sent there after entering your initials). Scores are stored in a
+**Cloudflare D1** database behind a tiny Pages Function at `/api/scores`. The game still runs
+fully offline: if the API can't be reached it silently falls back to a per-device local board.
+
+### Deploying the leaderboard (one-time setup)
+
+The site deploys as a **Cloudflare Pages** project (static `index.html` + the `functions/` API).
+
+```bash
+# 1. create the database (copy the printed database_id into wrangler.toml)
+npx wrangler d1 create helicopter-henry-scores
+
+# 2. apply the schema to the remote DB
+npx wrangler d1 execute helicopter-henry-scores --remote --file=./schema.sql
+
+# 3. in the Cloudflare dashboard: Pages project -> Settings -> Functions ->
+#    D1 database bindings -> add binding named  DB  -> helicopter-henry-scores
+```
+
+Local dev with the API: `npx wrangler pages dev .` (serves the static file + Functions,
+using a local D1). Without any of this the game runs exactly as before, just offline-only.
+
 ## Tech
 
-Plain HTML5 canvas + JavaScript in one `index.html` (~200 KB, audio included). No libraries.
+Plain HTML5 canvas + JavaScript in one `index.html` (~290 KB, audio included). No libraries.
+Global leaderboard via a single Cloudflare Pages Function (`functions/api/scores.js`) + D1.
 
 🤖 Built with [Claude Code](https://claude.com/claude-code)

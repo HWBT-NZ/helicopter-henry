@@ -130,6 +130,33 @@ const Save = (() => {
   };
 })();
 
+// ============================================================ LEADERBOARD (D1)
+// Global high scores live in a Cloudflare D1 table behind /api/scores. Everything
+// degrades gracefully: if the API is unreachable (offline / opened via file://),
+// the game keeps using the local Save 'scores' table and nothing throws.
+const Net = (() => {
+  let scores = null;      // last-known global top list [{n,s}], or null if never loaded
+  let online = false;     // did the most recent request succeed?
+  let inflight = false;
+  async function refresh(){
+    if(inflight) return; inflight = true;
+    try{
+      const r = await fetch('/api/scores', { cache:'no-store' });
+      if(r.ok){ const d = await r.json(); if(d && Array.isArray(d.scores)){ scores = d.scores; online = !d.offline; } }
+    }catch(e){ /* offline: keep whatever we have */ }
+    inflight = false;
+  }
+  async function submit(name, score){
+    try{
+      const r = await fetch('/api/scores', { method:'POST',
+        headers:{ 'content-type':'application/json' },
+        body: JSON.stringify({ name, score }) });
+      if(r.ok){ const d = await r.json(); if(d && Array.isArray(d.scores)){ scores = d.scores; online = !d.offline; } }
+    }catch(e){ /* offline: local table already saved */ }
+  }
+  return { refresh, submit, list:()=>scores, isOnline:()=>online };
+})();
+
 // ============================================================ CANVAS
 // Display canvas (events + final blit target). All draw code renders to the VIRTUAL
 // back-buffer `ctx`/`vcanvas`; each frame we integer-scale it onto the display via blit().
@@ -521,7 +548,7 @@ const Audio = (() => {
 const Settings = { muted:Save.get('muted'), reduceFx:Save.get('reduceFx'), showFps:false, crt:true };
 
 // ============================================================ GAME STATE
-const MODE = { TITLE:'title', GARAGE:'garage', PLAYING:'playing', DEAD:'dead' };
+const MODE = { TITLE:'title', GARAGE:'garage', PLAYING:'playing', DEAD:'dead', SCORES:'scores' };
 let mode = 'boot';
 let insertT = 0, insertFrom = null;   // coin-insert transition
 let bootT = 0, idleT = 0;             // boot sequence / title idle-to-attract
@@ -1197,6 +1224,7 @@ function press(fly){ Audio.ensure(); idleT=0;
   if(fx) return;
   if(mode==='boot'){ startTransition(MODE.TITLE); return; }
   if(mode==='attract'){ startTransition(MODE.TITLE); return; }
+  if(mode===MODE.SCORES){ mode=MODE.TITLE; Audio.SFX.blip(); return; }
   if(mode===MODE.TITLE){ insertFrom='title'; insertT=0; mode='insert'; Audio.SFX.coinInsert(); return; }
   if(mode===MODE.DEAD){ const fs=Math.floor(game.score);
     if(qualifies(fs)){ startEntry(fs); Audio.SFX.coinInsert(); }
@@ -1227,6 +1255,8 @@ window.addEventListener('keydown', e=>{
   else if(e.key==='p'||e.key==='P'){ if(mode===MODE.PLAYING) mode='paused'; else if(mode==='paused') mode=MODE.PLAYING; }
   else if(e.key==='m'||e.key==='M'){ Settings.muted=!Settings.muted; Save.set('muted',Settings.muted); Audio.setMuted(Settings.muted); }
   else if(e.key==='g'||e.key==='G'){ if(mode===MODE.TITLE) mode=MODE.GARAGE; else if(mode===MODE.GARAGE) mode=MODE.TITLE; }
+  else if(e.key==='l'||e.key==='L'){ if(mode===MODE.TITLE) openScores(); else if(mode===MODE.SCORES) mode=MODE.TITLE; }
+  else if(e.key==='Escape'){ if(mode===MODE.SCORES||mode===MODE.GARAGE) mode=MODE.TITLE; }
   else if(e.key==='`'){ Settings.showFps=!Settings.showFps; }
 });
 window.addEventListener('keyup', e=>{
@@ -1242,8 +1272,9 @@ canvas.addEventListener('mousemove', e=>{ Aim.x=e.clientX; Aim.y=e.clientY; Aim.
 canvas.addEventListener('mousedown', e=>{ e.preventDefault();
   if(e.button===2){ if(mode===MODE.PLAYING) Input.fire=true; return; }
   if(mode===MODE.GARAGE){ garageClick(toWX(e.clientX),toWY(e.clientY)); return; }
-  if(mode===MODE.TITLE){ // check garage button hotspot
-    if(titleGarageHot(toWX(e.clientX),toWY(e.clientY))){ mode=MODE.GARAGE; Audio.ensure(); Audio.SFX.blip(); return; } }
+  if(mode===MODE.TITLE){ const mx=toWX(e.clientX), my=toWY(e.clientY);
+    if(titleLbHot(mx,my)){ Audio.ensure(); openScores(); return; }
+    if(titleGarageHot(mx,my)){ mode=MODE.GARAGE; Audio.ensure(); Audio.SFX.blip(); return; } }
   press(true);
 });
 window.addEventListener('mouseup', e=>{ if(e.button===2){ Input.fire=false; } else release(); });
@@ -1256,7 +1287,10 @@ canvas.addEventListener('touchstart', e=>{ e.preventDefault(); Audio.ensure(); i
   if(mode==='entry'){ entryTouch(toWX(t.clientX),toWY(t.clientY)); return; }
   if(mode==='boot'||mode==='attract'){ startTransition(MODE.TITLE); return; }
   if(mode===MODE.GARAGE){ garageClick(toWX(t.clientX),toWY(t.clientY)); return; }
-  if(mode===MODE.TITLE){ if(titleGarageHot(toWX(t.clientX),toWY(t.clientY))){ mode=MODE.GARAGE; Audio.SFX.blip(); return; } press(true); return; }
+  if(mode===MODE.SCORES){ mode=MODE.TITLE; Audio.SFX.blip(); return; }
+  if(mode===MODE.TITLE){ const mx=toWX(t.clientX), my=toWY(t.clientY);
+    if(titleLbHot(mx,my)){ openScores(); return; }
+    if(titleGarageHot(mx,my)){ mode=MODE.GARAGE; Audio.SFX.blip(); return; } press(true); return; }
   if(mode===MODE.DEAD){ press(true); return; }
   if(mode==='paused'){ mode=MODE.PLAYING; return; }
   if(mode===MODE.PLAYING && game.phase==='top'){ Aim.x=t.clientX; Aim.y=t.clientY; Aim.active=true; return; }
@@ -1555,8 +1589,9 @@ function drawCoinSlot(cx,cy,inserting){
   else if(Math.floor(anim/22)%2===0) pixText('INSERT COIN', cx, cy+50, 190, '#ffe14d', '#b71c07', 4);
 }
 let titleHeli={x:0,y:0};
-let garageBtn={x:0,y:0,w:0,h:0};
+let garageBtn={x:0,y:0,w:0,h:0}, lbBtn={x:0,y:0,w:0,h:0};
 function titleGarageHot(mx,my){ return mx>=garageBtn.x&&mx<=garageBtn.x+garageBtn.w&&my>=garageBtn.y&&my<=garageBtn.y+garageBtn.h; }
+function titleLbHot(mx,my){ return mx>=lbBtn.x&&mx<=lbBtn.x+lbBtn.w&&my>=lbBtn.y&&my<=lbBtn.y+lbBtn.h; }
 function drawTitle(){
   const b=BIOMES[0]; drawSky(b); drawClouds();
   const hx=W*0.5+Math.sin(anim*0.03)*(W*0.12), hy=H*0.52+Math.sin(anim*0.06)*12;
@@ -1570,11 +1605,16 @@ function drawTitle(){
   pixText('JUST GET GOOD', W/2, y, W*0.55, '#fff', '#7a0f0c', 6);
   drawCoinSlot(W/2, H*0.60, false);
   if(Math.floor(anim/18)%2===0) pixText(IS_MOBILE?'TAP TO PLAY   ( DOUBLE-TAP = SHOOT )':'SPACE/CLICK = PLAY   ( F = SHOOT )', W/2, H*0.93, W*0.86, '#fff', '#1a3a8f', 4);
-  // garage button
-  const gw=Math.min(320,W*0.4), gh=54; garageBtn={x:W/2-gw/2,y:H*0.80,w:gw,h:gh};
-  ctx.fillStyle='#2e7d32'; ctx.fillRect(garageBtn.x,garageBtn.y,gw,gh);
-  ctx.strokeStyle='#1b4d1e'; ctx.lineWidth=4; ctx.strokeRect(garageBtn.x,garageBtn.y,gw,gh);
-  pixText(IS_MOBILE?'GARAGE':'GARAGE (G)', W/2, garageBtn.y+14, gw*0.8, '#fff', '#0a2a0a', 4);
+  // leaderboard + garage buttons (side by side)
+  const bw=Math.min(300,W*0.42), gh=54, bgap=Math.min(24,W*0.03);
+  const totalBw=bw*2+bgap, bx0=W/2-totalBw/2, by=H*0.80;
+  lbBtn={x:bx0,y:by,w:bw,h:gh}; garageBtn={x:bx0+bw+bgap,y:by,w:bw,h:gh};
+  ctx.fillStyle='#2f4d8a'; ctx.fillRect(lbBtn.x,lbBtn.y,bw,gh);
+  ctx.strokeStyle='#1b2f57'; ctx.lineWidth=4; ctx.strokeRect(lbBtn.x,lbBtn.y,bw,gh);
+  pixText(IS_MOBILE?'SCORES':'SCORES (L)', lbBtn.x+bw/2, lbBtn.y+14, bw*0.82, '#fff', '#0a1a3a', 4);
+  ctx.fillStyle='#2e7d32'; ctx.fillRect(garageBtn.x,garageBtn.y,bw,gh);
+  ctx.strokeStyle='#1b4d1e'; ctx.lineWidth=4; ctx.strokeRect(garageBtn.x,garageBtn.y,bw,gh);
+  pixText(IS_MOBILE?'GARAGE':'GARAGE (G)', garageBtn.x+bw/2, garageBtn.y+14, bw*0.82, '#fff', '#0a2a0a', 4);
   pixText('COINS '+Save.get('coins'), 90, H-30, 160, '#7cf07c', '#0a3a0a', 3, 'left');
 }
 
@@ -1660,6 +1700,22 @@ function drawScores(topY, n){ const l=Save.get('scores')||[];
     const row=(i+1)+'  '+s.n+'  '+String(s.s);
     pixText(row, W/2, y, W*0.55, i===0?'#fff':'#9fd0ff', '#000', 3); y+=70; } }
 
+function openScores(){ mode=MODE.SCORES; Net.refresh(); Audio.SFX.blip(); }
+function drawScoresScreen(){
+  ctx.fillStyle='#0b1020'; ctx.fillRect(0,0,W,H);
+  pixText('LEADERBOARD', W/2, H*0.05, W*0.72, '#ffe14d', '#b71c07', 6);
+  const g=Net.list(); const online=Net.isOnline() && g;
+  const l = (g && g.length) ? g : (Save.get('scores')||[]);
+  pixText(online?'GLOBAL TOP 10':'YOUR BEST (OFFLINE)', W/2, H*0.155, W*0.55, '#9fd0ff', '#000', 3);
+  const n=Math.min(10,l.length); let y=H*0.25;
+  for(let i=0;i<n;i++){ const s=l[i];
+    const rank=(i+1<10?' ':'')+(i+1);
+    const row=rank+'  '+(s.n||'???')+'  '+String(s.s);
+    pixText(row, W/2, y, W*0.62, i===0?'#fff':'#9fd0ff', '#000', 3); y+=H*0.065; }
+  if(n===0) pixText('NO SCORES YET', W/2, H*0.42, W*0.5, '#9fd0ff','#000',3);
+  if(Math.floor(anim/18)%2===0) pixText(IS_MOBILE?'TAP TO GO BACK':'SPACE / ESC = BACK', W/2, H*0.92, W*0.62, '#fff','#1a3a8f',4);
+}
+
 function qualifies(fs){ const l=Save.get('scores')||[]; return fs>0 && (l.length<10 || fs>l[l.length-1].s); }
 const CHARS='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.!-';
 function startEntry(fs){ entry={i:[7,4,13], col:0, score:fs}; mode='entry'; }   // default "HEN"
@@ -1671,8 +1727,11 @@ function entryInput(a){ if(!entry) return;
   else if(a==='ok'){ if(entry.col<2) entry.col++; else commitScore(); }
   Audio.ensure(); Audio.SFX.blip(); }
 function commitScore(){ const name=entry.i.map(k=>CHARS[k]).join('');
-  const l=Save.get('scores')||[]; l.push({n:name, s:entry.score}); l.sort((a,b)=>b.s-a.s); if(l.length>10) l.length=10;
-  Save.set('scores', l); entry=null; Audio.SFX.power(); startTransition(MODE.TITLE); }
+  const sc=entry.score;
+  const l=Save.get('scores')||[]; l.push({n:name, s:sc}); l.sort((a,b)=>b.s-a.s); if(l.length>10) l.length=10;
+  Save.set('scores', l); entry=null; Audio.SFX.power();
+  Net.submit(name, sc);                 // push to the global D1 board (updates Net.list on success)
+  startTransition(MODE.SCORES); }       // show the leaderboard so the player sees their entry
 function entryTouch(wx,wy){ if(!entry) return; const cw=W*0.13;
   for(let c=0;c<3;c++){ const x=W/2+(c-1)*cw; if(Math.abs(wx-x)<cw*0.5 && wy>H*0.34 && wy<H*0.62){ entry.col=c; entryInput(wy<H*0.48?'up':'down'); return; } }
   if(wy>H*0.72) entryInput('ok'); }
@@ -1750,7 +1809,7 @@ function loop(now){
   if(mode===MODE.TITLE){ idleT++; if(idleT>540 && !fx) startAttract(); }
 
   // title music on menu screens (starts once audio is unlocked)
-  if(mode===MODE.TITLE || mode===MODE.GARAGE || mode==='attract' || mode==='entry' || (mode==='insert'&&insertFrom==='title')) Audio.playTitle();
+  if(mode===MODE.TITLE || mode===MODE.GARAGE || mode===MODE.SCORES || mode==='attract' || mode==='entry' || (mode==='insert'&&insertFrom==='title')) Audio.playTitle();
   else Audio.stopTitle();
 
   // ---------- render ----------
@@ -1781,6 +1840,7 @@ function loop(now){
   else if(mode==='entry'){ drawEntry(); }
   else if(mode==='boot'){ drawBoot(); }
   else if(mode===MODE.GARAGE){ drawGarage(); }
+  else if(mode===MODE.SCORES){ drawScoresScreen(); }
   else if(mode==='insert'){ const slotY=insertFrom==='title'?H*0.60:H*0.64;
     if(insertFrom==='dead') drawGameOver(true); else { /* title slot already drawn */ drawCoinSlot(W/2,slotY,true); }
     const p=Math.min(1,insertT/20), e=U.ease(p); const cy=(slotY-170)+((slotY-18)-(slotY-170))*e;
@@ -1806,6 +1866,7 @@ function startPlay(){ resetRun(); mode=MODE.PLAYING; Input.fly=false; acc=0; las
 buildSprites();
 seedClouds();
 resetRun();
+Net.refresh();               // warm the global leaderboard (no-op / silent when offline)
 mode='boot';                 // boot sting -> fade -> title
 requestAnimationFrame(loop);
 
